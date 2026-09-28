@@ -12,4 +12,30 @@
 /captures
 .externalNativeBuild
 .cxx
+
+# Local configuration file (contains local SDK path & API keys)
 local.properties
+
+# Build outputs and temporary files
+*.apk
+*.aab
+*.dex
+*.class
+/build/
+/app/build/
+.gradle/
+captures/
+
+# IDE specific settings
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/gradle.xml
+.idea/assetWizardSettings.xml
+.idea/dictionaries
+.idea/libraries
+
+# Keystore files / Secrets
+*.jks
+*.keystore
+*.p12
+*.pepk
