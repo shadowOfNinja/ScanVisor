@@ -63,6 +63,7 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.min
+import androidx.compose.ui.layout.ContentScale
 
 
 val VisorBlue = Color(0xFF00E5FF)
@@ -138,19 +139,18 @@ fun ScanVisorHUD() {
                             return@detectTapGestures
                         }
 
-                        // 1. Capture current frame & Pause feed
+                        // 1. Capture frame in background WITHOUT pausing preview immediately
                         isScanning = true
                         imageCapture?.takePicture(
                             Executors.newSingleThreadExecutor(),
                             object : ImageCapture.OnImageCapturedCallback() {
                                 override fun onCaptureSuccess(image: ImageProxy) {
-                                    // Apply sensor rotation degrees to keep the bitmap upright
                                     val rotationDegrees = image.imageInfo.rotationDegrees.toFloat()
                                     val rawBitmap = image.toBitmap()
                                     val rotatedBitmap = rawBitmap.rotate(rotationDegrees)
 
                                     capturedFrame = rotatedBitmap
-                                    isPaused = true
+                                    // Note: isPaused is NOT set to true here!
                                     image.close()
                                 }
 
@@ -175,25 +175,28 @@ fun ScanVisorHUD() {
                             fillJob.cancel()
                             cancelScan()
                         } else {
-                            // 3. Scan line reached 100% -> Run AI Vision Analysis
+                            // 3. Scan line reached 100% -> Freeze frame & Run AI Vision Analysis
                             scanCompleted = true
                             isScanning = false
+                            isPaused = true // Freeze the screen ONLY when scan is fully completed!
                             isAnalyzing = true
 
                             coroutineScope.launch {
                                 capturedFrame?.let { bmp ->
-                                    val text = analyzeFrameDirectHttp(bmp)
+                                    // Crop bitmap to scan reticle boundary + 20% buffer before sending
+                                    val croppedBmp = bmp.cropToReticle(
+                                        reticleWidthRatio = 0.75f,
+                                        reticleHeightRatio = 0.50f,
+                                        bufferPercent = 0.20f
+                                    )
+
+                                    val text = analyzeFrameDirectHttp(croppedBmp)
                                     resultText = text
                                     isAnalyzing = false
                                 } ?: run {
-                                    resultText = "ERROR >> Frame capture failed."
+                                    resultText = formatInUniverseError("capture failed") // <-- In-universe error
                                     isAnalyzing = false
                                 }
-
-                                /*resultText = "QUERYING SUPPORTED MODELS..."
-                                val modelsList = fetchAvailableModels()
-                                resultText = modelsList
-                                isAnalyzing = false*/
                             }
                         }
                     }
@@ -205,22 +208,39 @@ fun ScanVisorHUD() {
             Image(
                 bitmap = capturedFrame!!.asImageBitmap(),
                 contentDescription = "Frozen Frame",
+                contentScale = ContentScale.Crop, // <-- Fits bitmap to edge-to-edge full screen
                 modifier = Modifier.fillMaxSize()
             )
         } else {
             CameraFeed(onImageCaptureReady = { capture -> imageCapture = capture })
         }
 
-        // HUD Vignette Mask (Dimmed Outside Center)
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            drawRect(color = Color.Black.copy(alpha = 0.55f))
-            val reticleRadius = 140.dp.toPx()
-            drawCircle(
-                color = Color.Transparent,
-                radius = reticleRadius,
-                center = center,
-                blendMode = BlendMode.Clear
-            )
+        // HUD Vignette Overlay (Four dark panels around central cutout)
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val reticleSizePx = with(density) { 300.dp.toPx() } // Matches reticle Modifier.size(300.dp)
+
+            // Matches ScanReticleOverlay rect dimensions (w * 0.75f and h * 0.5f)
+            val rectWidth = reticleSizePx * 0.75f
+            val rectHeight = reticleSizePx * 0.5f
+
+            val left = (constraints.maxWidth - rectWidth) / 2f
+            val top = (constraints.maxHeight - rectHeight) / 2f
+            val right = left + rectWidth
+            val bottom = top + rectHeight
+
+            val overlayColor = Color.Black.copy(alpha = 0.55f)
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                // Top overlay block
+                drawRect(color = overlayColor, topLeft = Offset(0f, 0f), size = Size(size.width, top))
+                // Bottom overlay block
+                drawRect(color = overlayColor, topLeft = Offset(0f, bottom), size = Size(size.width, size.height - bottom))
+                // Left overlay block
+                drawRect(color = overlayColor, topLeft = Offset(0f, top), size = Size(left, rectHeight))
+                // Right overlay block
+                drawRect(color = overlayColor, topLeft = Offset(right, top), size = Size(size.width - right, rectHeight))
+            }
         }
 
         // Center Scanning Reticle & Fill Bar
@@ -275,35 +295,80 @@ fun ScanReticleOverlay(
         val h = size.height
         val centerPt = Offset(w / 2f, h / 2f)
 
-        // Center Aiming Reticle Brackets
-        val lineLen = 30f
-        val stroke = 4f
+        // Rectangular Frame Dimensions
+        val rectWidth = w * 0.75f
+        val rectHeight = h * 0.5f
+        val left = centerPt.x - (rectWidth / 2f)
+        val top = centerPt.y - (rectHeight / 2f)
+        val right = left + rectWidth
+        val bottom = top + rectHeight
 
-        drawCircle(color = currentColor, radius = w * 0.38f, style = Stroke(width = 2f))
+        val cornerLength = 24f
+        val strokeWidth = 4f
 
-        // Horizontal Scanning Bar Fill (Underneath Reticle Center)
-        val barTop = centerPt.y + (h * 0.18f)
-        val barWidth = w * 0.7f
-        val barLeft = centerPt.x - (barWidth / 2f)
-        val barHeight = 12f
+        // Top-Left Corner Bracket
+        drawLine(currentColor, Offset(left, top), Offset(left + cornerLength, top), strokeWidth)
+        drawLine(currentColor, Offset(left, top), Offset(left, top + cornerLength), strokeWidth)
 
-        // Bar background outline
+        // Top-Right Corner Bracket
+        drawLine(currentColor, Offset(right, top), Offset(right - cornerLength, top), strokeWidth)
+        drawLine(currentColor, Offset(right, top), Offset(right, top + cornerLength), strokeWidth)
+
+        // Bottom-Left Corner Bracket
+        drawLine(currentColor, Offset(left, bottom), Offset(left + cornerLength, bottom), strokeWidth)
+        drawLine(currentColor, Offset(left, bottom), Offset(left, bottom - cornerLength), strokeWidth)
+
+        // Bottom-Right Corner Bracket
+        drawLine(currentColor, Offset(right, bottom), Offset(right - cornerLength, bottom), strokeWidth)
+        drawLine(currentColor, Offset(right, bottom), Offset(right, bottom - cornerLength), strokeWidth)
+
+        // Full faint border connecting corner brackets
+        drawRect(
+            color = currentColor.copy(alpha = 0.25f),
+            topLeft = Offset(left, top),
+            size = Size(rectWidth, rectHeight),
+            style = Stroke(width = 1.5f)
+        )
+
+        // Progress Bar (Positioned directly underneath the reticle rectangle)
+        val barTop = bottom + 16f
+        val barHeight = 10f
+
+        // Progress Bar Outline Track
         drawRect(
             color = currentColor.copy(alpha = 0.3f),
-            topLeft = Offset(barLeft, barTop),
-            size = Size(barWidth, barHeight),
+            topLeft = Offset(left, barTop),
+            size = Size(rectWidth, barHeight),
             style = Stroke(width = 2f)
         )
 
-        // Animated Left-To-Right Fill Progress
+        // Animated Fill Bar (Fills Left-To-Right)
         if (progress > 0f) {
             drawRect(
                 color = currentColor,
-                topLeft = Offset(barLeft, barTop),
-                size = Size(barWidth * progress, barHeight)
+                topLeft = Offset(left, barTop),
+                size = Size(rectWidth * progress, barHeight)
             )
         }
     }
+}
+
+fun Bitmap.cropToReticle(
+    reticleWidthRatio: Float = 0.75f,
+    reticleHeightRatio: Float = 0.50f,
+    bufferPercent: Float = 0.20f
+): Bitmap {
+    // Reticle frame size relative to the box dimensions
+    val bufferedWidthRatio = (reticleWidthRatio * (1f + bufferPercent)).coerceAtMost(1f)
+    val bufferedHeightRatio = (reticleHeightRatio * (1f + bufferPercent)).coerceAtMost(1f)
+
+    val cropWidth = (width * bufferedWidthRatio).toInt()
+    val cropHeight = (height * bufferedHeightRatio).toInt()
+
+    val startX = ((width - cropWidth) / 2).coerceAtLeast(0)
+    val startY = ((height - cropHeight) / 2).coerceAtLeast(0)
+
+    return Bitmap.createBitmap(this, startX, startY, cropWidth, cropHeight)
 }
 
 @Composable
@@ -352,6 +417,36 @@ fun LoreBoxOverlay(text: String, isLoading: Boolean, modifier: Modifier = Modifi
             )
         }
     }
+}
+
+fun formatInUniverseError(rawError: String): String {
+    val code = when {
+        rawError.contains("429") -> "ERR_429_BANDWIDTH_SATURATED"
+        rawError.contains("503") || rawError.contains("500") -> "ERR_503_RELAY_OFFLINE"
+        rawError.contains("404") -> "ERR_404_DATABASE_UNREACHABLE"
+        rawError.contains("TIMEOUT") || rawError.contains("SocketTimeout") -> "ERR_TIMEOUT_SIGNAL_DECAY"
+        rawError.contains("capture failed") -> "ERR_OPTICAL_SENSOR_MALFUNCTION"
+        else -> "ERR_UNKNOWN_INTERFERENCE"
+    }
+
+    val detail = when {
+        rawError.contains("429") -> "Target acquisition frequency exceeded. Data uplink buffer full. Standby for sensor cooldown."
+        rawError.contains("503") || rawError.contains("500") -> "Chozo relay node unresponsive. Atmospheric disturbance blocking remote processing."
+        rawError.contains("404") -> "Target classification protocol not found in current visor index."
+        rawError.contains("TIMEOUT") || rawError.contains("SocketTimeout") -> "Telemetry signal lost during trans-atmospheric packet transfer."
+        rawError.contains("capture failed") -> "Primary optical sensor failed to resolve focal lock."
+        else -> "Unidentified signal attenuation prevented full database synthesis."
+    }
+
+    return """
+        ### **WARNING: SCAN FAILURE**
+        
+        > [SYSTEM WARNING: $code]
+        
+        $detail
+        
+        Re-align reticle and re-engage target scan.
+    """.trimIndent()
 }
 
 fun Bitmap.rotate(degrees: Float): Bitmap {
@@ -404,7 +499,7 @@ fun CameraFeed(onImageCaptureReady: (ImageCapture) -> Unit) {
     )
 }
 
-fun scaleBitmapForAnalysis(bitmap: Bitmap, maxDimension: Int = 1080): Bitmap {
+fun scaleBitmapForAnalysis(bitmap: Bitmap, maxDimension: Int = 512): Bitmap {
     val width = bitmap.width
     val height = bitmap.height
     if (width <= maxDimension && height <= maxDimension) return bitmap
@@ -428,7 +523,7 @@ suspend fun analyzeFrameDirectHttp(bitmap: Bitmap): String = withContext(Dispatc
     // Downscale frame to prevent massive Base64 payloads and HTTP timeouts
     val scaledBitmap = scaleBitmapForAnalysis(bitmap, maxDimension = 1080)
     val byteArrayOutputStream = ByteArrayOutputStream()
-    scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 75, byteArrayOutputStream)
+    scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 60, byteArrayOutputStream)
     val base64Image = Base64.encodeToString(byteArrayOutputStream.toByteArray(), Base64.NO_WRAP)
 
     val promptText = "You are the Scan Visor from the Metroid Prime video game series, operating for Samus Aran. When given an object name or description, you must analyze it and return a classified database entry.\n" +
@@ -457,11 +552,11 @@ suspend fun analyzeFrameDirectHttp(bitmap: Bitmap): String = withContext(Dispatc
             "\n" +
             " \n" +
             "\n" +
-            "### **DATA ENTRY: [CATEGORY GROUP]**\n" +
+            "### **[CATEGORY GROUP]: [TARGET]**\n" +
             "\n" +
             " \n" +
             "\n" +
-            "> [A 1-2 sentence concise operational summary of the target.]\n" +
+            "[A 1-2 sentence concise operational summary of the target.]\n" +
             "\n" +
             " \n" +
             "\n" +
@@ -526,7 +621,7 @@ suspend fun analyzeFrameDirectHttp(bitmap: Bitmap): String = withContext(Dispatc
                 } else if (responseCode == 404) {
                     break // Move to next model candidate if endpoint is missing
                 } else {
-                    return@withContext lastErrorMessage
+                    return@withContext formatInUniverseError(lastErrorMessage) // <-- In-universe error
                 }
             } catch (e: Exception) {
                 lastErrorMessage = "SCAN TIMEOUT / FAILURE ($modelName) >> ${e.localizedMessage}"
@@ -535,7 +630,7 @@ suspend fun analyzeFrameDirectHttp(bitmap: Bitmap): String = withContext(Dispatc
         }
     }
 
-    return@withContext lastErrorMessage
+    return@withContext formatInUniverseError(lastErrorMessage)
 }
 
 suspend fun fetchAvailableModels(): String = withContext(Dispatchers.IO) {
